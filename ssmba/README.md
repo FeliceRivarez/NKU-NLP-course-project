@@ -48,3 +48,8 @@ python ssmba.py \
     --max-len 512 \
     --topk 10
 ```
+
+### 前20w条WMT14数据增强结果
+通过网盘分享的文件：augmented_train_sentence_pairs_en_de_200000.zip
+链接: https://pan.baidu.com/s/1uRJv4d-zwS4-TdJl_5zneQ?pwd=vstj 提取码: vstj 
+--来自百度网盘超级会员v3的分享
