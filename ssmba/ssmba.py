@@ -5,14 +5,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 from utils import hf_masked_encode, hf_reconstruction_prob_tok, fill_batch
-import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
+from tqdm import tqdm  # 导入 tqdm 库，用于显示进度条
+from datasets import load_dataset
 
-import os
-os.environ["http_proxy"] = "http://127.0.0.1:4780"
-os.environ["https_proxy"] = "http://127.0.0.1:4780"
+import torch
+import warnings
 
 def gen_neighborhood(args):
+    print("ds load begin!")
+    # 加载wmt14德语-英语数据集
+    ds = load_dataset("wmt/wmt14", "de-en")
+
+    # 获取训练集的德语和英语句子
+    # de_sentences = [item['de'] for item in ds['train']['translation']]
+    # en_sentences = [item['en'] for item in ds['train']['translation']]
+    de_sentences = [item['de'] for item in ds['train']['translation'][:200000]]
+    en_sentences = [item['en'] for item in ds['train']['translation'][:200000]]
+    print("ds load finished!")
 
     # initialize seed
     if args.seed is not None:
@@ -23,8 +32,15 @@ def gen_neighborhood(args):
     r_model = AutoModelForMaskedLM.from_pretrained(args.model)
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     r_model.eval()
+
+    # Check for GPU availability and handle it
     if torch.cuda.is_available():
         r_model.cuda()
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+        # If GPU is not available, show a yellow warning message
+        warnings.warn("Warning: GPU is not available. The model will run on CPU, which might be slower.", category=UserWarning)
 
     # remove unused vocab and special ids from sampling
     softmax_mask = np.full(len(tokenizer.vocab), False)
@@ -33,11 +49,21 @@ def gen_neighborhood(args):
         if '[unused' in k:
             softmax_mask[v] = True
 
+    print("load the inputs begin!")
     # load the inputs and labels
-    lines = [tuple(s.strip().split('\t')) for s in open(args.in_file).readlines()]
-    num_lines = len(lines)
-    lines = [[[s] for s in s_list] for s_list in list(zip(*lines))]
-    assert len(lines) <= 2, "Only single sentences or sentence pairs can be encoded."
+    lines = []
+    # with open(args.in_file, 'r') as f:
+    #     for line in f:
+    #         lines.append(tuple(line.strip().split('\t')))
+    # lines = [[[s] for s in s_list] for s_list in list(zip(*lines))]
+    # assert len(lines) <= 2, "Only single sentences or sentence pairs can be encoded."
+    # 组合句子对
+    sentence_pairs = [(str(en), str(de)) for en, de in zip(en_sentences, de_sentences)]
+
+    # 将句子对转换为所需格式
+    lines = [[de] for en, de in sentence_pairs], [[en] for en, de in sentence_pairs]
+    num_lines = len(lines[0])
+    print("load the inputs end!")
 
     # load label file if it exists
     if args.label_file:
@@ -58,12 +84,10 @@ def gen_neighborhood(args):
     else:
         contexts = None
 
-
-
     # shard the input and labels
     if args.num_shards > 0:
-        shard_start = (int(num_lines/args.num_shards) + 1) * args.shard
-        shard_end = (int(num_lines/args.num_shards) + 1) * (args.shard + 1)
+        shard_start = (int(num_lines / args.num_shards) + 1) * args.shard
+        shard_end = (int(num_lines / args.num_shards) + 1) * (args.shard + 1)
         lines = [s_list[shard_start:shard_end] for s_list in lines]
         labels = labels[shard_start:shard_end]
 
@@ -95,40 +119,44 @@ def gen_neighborhood(args):
     next_sent = 0
 
     sents, l, context_list, next_sent, num_gen, num_tries, gen_index = \
-            fill_batch(args,
-                       tokenizer,
-                       sents,
-                       l,
-                       context_list,
-                       lines,
-                       contexts,
-                       labels,
-                       next_sent,
-                       num_gen,
-                       num_tries,
-                       gen_index)
+        fill_batch(args,
+                   tokenizer,
+                   sents,
+                   l,
+                   context_list,
+                   lines,
+                   contexts,
+                   labels,
+                   next_sent,
+                   num_gen,
+                   num_tries,
+                   gen_index)
 
     # main augmentation loop
-    while (sents != []):
+    num_processed = 0
+    total_lines = num_lines
+    with tqdm(total=total_lines, desc="Processing", unit="line") as pbar:  # 使用 tqdm 进度条
+        while sents != []:
+            # remove any sentences that are done generating and dump to file
+            for i in range(len(num_gen))[::-1]:
+                if num_gen[i] == args.num_samples or num_tries[i] > args.max_tries:
+                    # get sent info
+                    gen_sents = sents.pop(i)
+                    num_gen.pop(i)
+                    gen_index.pop(i)
+                    label = l.pop(i)
 
-        # remove any sentences that are done generating and dump to file
-        for i in range(len(num_gen))[::-1]:
-            if num_gen[i] == args.num_samples or num_tries[i] > args.max_tries:
+                    # write generated sentences
+                    for sg in gen_sents[1:]:
+                        s_rec_file.write('\t'.join(reversed([repr(val)[1:-1] for val in sg])) + '\n')
+                        if output_labels:
+                            l_rec_file.write(label + '\n')
 
-                # get sent info
-                gen_sents = sents.pop(i)
-                num_gen.pop(i)
-                gen_index.pop(i)
-                label = l.pop(i)
+                    num_processed += 1
+                    pbar.update(1)  # 更新进度条
 
-                # write generated sentences
-                for sg in gen_sents[1:]:
-                    s_rec_file.write('\t'.join([repr(val)[1:-1] for val in sg]) + '\n')
-                    if output_labels:
-                        l_rec_file.write(label + '\n')
-
-        # fill batch
-        sents, l, context_list, next_sent, num_gen, num_tries, gen_index = \
+            # fill batch
+            sents, l, context_list, next_sent, num_gen, num_tries, gen_index = \
                 fill_batch(args,
                            tokenizer,
                            sents,
@@ -142,68 +170,69 @@ def gen_neighborhood(args):
                            num_tries,
                            gen_index)
 
-        # break if done dumping
-        if len(sents) == 0:
-            break
+            # break if done dumping
+            if len(sents) == 0:
+                break
 
-        # build batch
-        toks = []
-        masks = []
+            # build batch
+            toks = []
+            masks = []
 
-        for i in range(len(gen_index)):
-            s = sents[i][gen_index[i]]
-            c = context_list[i] if context_list is not None else None
-            tok, mask = hf_masked_encode(
-                    tokenizer,
-                    s,
-                    context=c,
-                    noise_prob=args.noise_prob,
-                    random_token_prob=args.random_token_prob,
-                    leave_unmasked_prob=args.leave_unmasked_prob,
-            )
-            toks.append(tok)
-            masks.append(mask)
+            for i in range(len(gen_index)):
+                s = sents[i][gen_index[i]]
+                c = context_list[i] if context_list is not None else None
+                tok, mask = hf_masked_encode(
+                        tokenizer,
+                        s,
+                        context=c,
+                        noise_prob=args.noise_prob,
+                        random_token_prob=args.random_token_prob,
+                        leave_unmasked_prob=args.leave_unmasked_prob,
+                )
+                toks.append(tok)
+                masks.append(mask)
 
-        # pad up to max len input
-        max_len = max([len(tok) for tok in toks])
-        pad_tok = tokenizer.pad_token_id
+            # pad up to max len input
+            max_len = max([len(tok) for tok in toks])
+            pad_tok = tokenizer.pad_token_id
 
-        toks = [F.pad(tok, (0, max_len - len(tok)), 'constant', pad_tok) for tok in toks]
-        masks = [F.pad(mask, (0, max_len - len(mask)), 'constant', pad_tok) for mask in masks]
-        toks = torch.stack(toks)
-        masks = torch.stack(masks)
+            toks = [F.pad(tok, (0, max_len - len(tok)), 'constant', pad_tok) for tok in toks]
+            masks = [F.pad(mask, (0, max_len - len(mask)), 'constant', pad_tok) for mask in masks]
+            toks = torch.stack(toks)
+            masks = torch.stack(masks)
 
-        # load to GPU if available
-        if torch.cuda.is_available():
-            toks = toks.cuda()
-            masks = masks.cuda()
+            # load to GPU if available
+            if torch.cuda.is_available():
+                toks = toks.cuda(device)
+                masks = masks.cuda(device)
+                # print("torch.cuda.is_available()\n")
 
-        # predict reconstruction
-        rec, rec_masks = hf_reconstruction_prob_tok(toks, masks, tokenizer, r_model, softmax_mask, reconstruct=True, topk=args.topk)
+            # predict reconstruction
+            rec, rec_masks = hf_reconstruction_prob_tok(toks, masks, tokenizer, r_model, softmax_mask, reconstruct=True, topk=args.topk)
 
-        # decode reconstructions and append to lists
-        for i in range(len(rec)):
-            rec_work = rec[i].cpu().tolist()
-            s_rec = [s.strip() for s in tokenizer.decode([val for val in rec_work if val != tokenizer.pad_token_id][1:-1]).split(tokenizer.sep_token)]
-            s_rec = tuple(s_rec)
+            # decode reconstructions and append to lists
+            for i in range(len(rec)):
+                rec_work = rec[i].cpu().tolist()
+                s_rec = [s.strip() for s in tokenizer.decode([val for val in rec_work if val != tokenizer.pad_token_id][1:-1]).split(tokenizer.sep_token)]
+                s_rec = tuple(s_rec)
 
-            # check if identical reconstruction or empty
-            if s_rec not in sents[i] and '' not in s_rec:
-                sents[i].append(s_rec)
-                num_gen[i] += 1
-                num_tries[i] = 0
-                gen_index[i] = 0
-
-            # otherwise try next sentence
-            else:
-                num_tries[i] += 1
-                gen_index[i] += 1
-                if gen_index[i] == len(sents[i]):
+                # check if identical reconstruction or empty
+                if s_rec not in sents[i] and '' not in s_rec:
+                    sents[i].append(s_rec)
+                    num_gen[i] += 1
+                    num_tries[i] = 0
                     gen_index[i] = 0
 
-        # clean up tensors
-        del toks
-        del masks
+                # otherwise try next sentence
+                else:
+                    num_tries[i] += 1
+                    gen_index[i] += 1
+                    if gen_index[i] == len(sents[i]):
+                        gen_index[i] = 0
+
+            # clean up tensors
+            del toks
+            del masks
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -287,5 +316,5 @@ if __name__ == "__main__":
     if not args.tokenizer:
         args.tokenizer = args.model
 
-
+    args = parser.parse_args()
     gen_neighborhood(args)
