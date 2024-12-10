@@ -2,6 +2,13 @@
 source /etc/network_turbo
 conda activate ssmba
 
+### 格式
+增强前增强后格式都为 sentence1 \t sentence2 \n
+sentence1 can be trasnlated to sentence2
+
+### 增强示例
+img 文件夹
+
 ### 原测试脚本
 // in dic ssmba
 ``` python
