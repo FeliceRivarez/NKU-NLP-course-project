@@ -10,14 +10,18 @@ original paper recommand that batch-size*update-freq equals 32.
 export OMP_WAIT_POLICY=PASSIVE
 
 PROJECT_PATH=$( cd -- "$( dirname -- "$ BASH_SOURCE[0]}" )" &> /dev/null && pwd )/../..
-BASE_MODEL=$PROJECT_PATH/pretrain-models/wmt19.de-en/wmt19.de-en.ffn8192.pt
-DATA_PATH=$PROJECT_PATH/data-bin/it
+# BASE_MODEL=$PROJECT_PATH/pretrain-models/wmt19.de-en/wmt19.de-en.ffn8192.pt
+# DATA_PATH=$PROJECT_PATH/data-bin/it
+
+DATA_PATH=/root/autodl-tmp/dataset/data-bin
+BASE_MODEL=/root/autodl-tmp/knn-box-master/newTrain/checkpoint_best.pt
+
 SAVE_DIR=$PROJECT_PATH/save-models/combiner/robust/it
 DATASTORE_LOAD_PATH=$PROJECT_PATH/datastore/vanilla/it
 MAX_K=8
 
 # using paper's settings
-CUDA_VISIBLE_DEVICES=3 python $PROJECT_PATH/fairseq_cli/train.py $DATA_PATH \
+CUDA_VISIBLE_DEVICES=0 python $PROJECT_PATH/fairseq_cli/train.py $DATA_PATH \
 --task translation \
 --train-subset valid --valid-subset valid \
 --best-checkpoint-metric "loss" \
@@ -34,7 +38,7 @@ CUDA_VISIBLE_DEVICES=3 python $PROJECT_PATH/fairseq_cli/train.py $DATA_PATH \
 --batch-size 4 \
 --update-freq 8 \
 --user-dir $PROJECT_PATH/knnbox/models \
---arch "robust_knn_mt@transformer_wmt19_de_en" \
+--arch "robust_knn_mt@transformer" \
 --knn-mode "train_metak" \
 --knn-datastore-path $DATASTORE_LOAD_PATH \
 --knn-max-k $MAX_K \
